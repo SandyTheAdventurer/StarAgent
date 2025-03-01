@@ -12,7 +12,7 @@ def main(args):
     agent = AgentZero()
     try:
         env= sc2_env.SC2Env(
-            map_name="AbyssalReef",
+            map_name="Simple128",
             players=[sc2_env.Agent(sc2_env.Race.zerg),
                     sc2_env.Bot(sc2_env.Race.random,
                     sc2_env.Difficulty.very_easy)],
