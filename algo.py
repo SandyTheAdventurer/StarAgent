@@ -36,7 +36,7 @@ NO_OP=actions.FUNCTIONS.no_op.id
 
 print(SELECT_POINT)
 
-print(actions.FUNCTIONS[actions.FUNCTIONS.Train_Hydralisk_quick.id])
+print(actions.FUNCTIONS[SELECT_POINT])
 torch.set_default_device('cuda')
 
 class ZergAgent(base_agent.BaseAgent, nn.Module):
@@ -71,10 +71,14 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.Linear(64, 64),
       nn.ReLU()
     )
-    self.classifier=nn.Linear(64, 5)
-    self.locater=nn.Linear(64, 8)
-    self.mu=nn.Linear(64, 2)
-    self.sigma=nn.Parameter(torch.zeros(2))
+    self.main=nn.Linear(64, 5)
+    self.screen_mu=nn.Linear(64, 2)
+    self.screen_sigma=nn.Linear(64, 2)
+    self.queued=nn.Linear(64, 2)
+    self.ctrl_grp_act=nn.Linear(64, 5)
+    self.ctrl_grp_id=nn.Linear(64, 10)
+    self.select_point_act=nn.Linear(64, 4)
+
 
   def forward(self, images, data):
     return self.feature_image(images), self.feature_data(data)
@@ -93,7 +97,6 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     data=data.unsqueeze(0)
 
     feature_screen=tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
-    print(self(feature_screen, data))
     return actions.FUNCTIONS.no_op()
 
 def main(unused_argv):
