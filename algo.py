@@ -12,6 +12,31 @@ MAX_SELECT=200
 MAX_CARGO=8
 MAX_QUEUE=5
 
+#Actions
+SELECT_POINT=actions.FUNCTIONS.select_point.id
+SELECT_ARMY=actions.FUNCTIONS.select_army.id
+MOVE_CAMERA=actions.FUNCTIONS.move_camera.id
+SELECT_CONTROL_GROUP=actions.FUNCTIONS.select_control_group.id
+HARVERST_GATHER=actions.FUNCTIONS.Harvest_Gather_screen.id
+ATTACK_MINIMAP=actions.FUNCTIONS.Attack_minimap.id
+TRAIN_DRONE_QUICK=actions.FUNCTIONS.Train_Drone_quick.id
+BUILD_SPAWNPOOL=actions.FUNCTIONS.Build_SpawningPool_screen.id
+TRAIN_ZERGLING=actions.FUNCTIONS.Train_Zergling_quick.id
+TRAIN_OVERLORD=actions.FUNCTIONS.Train_Overlord_quick.id
+HARVEST_RETURN = actions.FUNCTIONS.Harvest_Return_quick.id
+BUILD_HATCHERY = actions.FUNCTIONS.Build_Hatchery_screen.id
+BUILD_EXTRACTOR = actions.FUNCTIONS.Build_Extractor_screen.id
+BUILD_EVOLUTIONCHAMBER = actions.FUNCTIONS.Build_EvolutionChamber_screen.id
+BUILD_QUEEN = actions.FUNCTIONS.Train_Queen_quick.id
+BUILD_ROACHWARREN = actions.FUNCTIONS.Build_RoachWarren_screen.id
+TRAIN_ROACH = actions.FUNCTIONS.Train_Roach_quick.id
+BUILD_HYDRALISKDEN = actions.FUNCTIONS.Build_HydraliskDen_screen.id
+TRAIN_HYDRALISK = actions.FUNCTIONS.Train_Hydralisk_quick.id
+NO_OP=actions.FUNCTIONS.no_op.id
+
+print(SELECT_POINT)
+
+print(actions.FUNCTIONS[actions.FUNCTIONS.Train_Hydralisk_quick.id])
 torch.set_default_device('cuda')
 
 class ZergAgent(base_agent.BaseAgent, nn.Module):
@@ -95,6 +120,7 @@ def main(unused_argv):
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
+          break
         break
       
   except KeyboardInterrupt:
