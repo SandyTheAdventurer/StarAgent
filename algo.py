@@ -3,11 +3,16 @@ from pysc2.env import sc2_env
 from pysc2.lib import actions, features
 import torch.nn as nn
 import torch
-import numpy as np
-from torch import tensor
 from absl import app
 
 #Constants
+CONV_OUTPUT=256
+DATA_OUTPUT=64
+COMBINED_OUTPUT=64
+
+N_ACTIONS=20
+
+MAP_SIZE=84
 MAX_SELECT=200
 MAX_CARGO=8
 MAX_QUEUE=5
@@ -34,7 +39,7 @@ BUILD_HYDRALISKDEN = actions.FUNCTIONS.Build_HydraliskDen_screen.id
 TRAIN_HYDRALISK = actions.FUNCTIONS.Train_Hydralisk_quick.id
 NO_OP=actions.FUNCTIONS.no_op.id
 
-print(SELECT_POINT)
+action_ids=[SELECT_POINT, SELECT_ARMY, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
 
 print(actions.FUNCTIONS[SELECT_POINT])
 torch.set_default_device('cuda')
@@ -43,6 +48,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
   def __init__(self):
     base_agent.BaseAgent.__init__(self)
     nn.Module.__init__(self)
+
     self.feature_image=nn.Sequential(
       nn.Conv2d(27, 32, kernel_size=3, padding=1),
       nn.BatchNorm2d(32),
@@ -60,7 +66,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.MaxPool2d(kernel_size=2),
 
       nn.Flatten(),
-      nn.Linear(128 * 10 * 10, 512),
+      nn.Linear(128 * 10 * 10, CONV_OUTPUT),
       nn.ReLU()
     )
     self.feature_data=nn.Sequential(
@@ -68,20 +74,46 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.ReLU(),
       nn.Linear(128, 64),
       nn.ReLU(),
-      nn.Linear(64, 64),
+      nn.Linear(64, DATA_OUTPUT),
       nn.ReLU()
     )
-    self.main=nn.Linear(64, 5)
-    self.screen_mu=nn.Linear(64, 2)
-    self.screen_sigma=nn.Linear(64, 2)
-    self.queued=nn.Linear(64, 2)
-    self.ctrl_grp_act=nn.Linear(64, 5)
-    self.ctrl_grp_id=nn.Linear(64, 10)
-    self.select_point_act=nn.Linear(64, 4)
+    self.main=nn.Sequential(
+      nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 512),
+      nn.ReLU(),
+      nn.Linear(512, 256),
+      nn.ReLU(),
+      nn.Linear(256, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, COMBINED_OUTPUT),
+      nn.ReLU(),
+      )
+    self.actioner=nn.Sequential(nn.Linear(64, N_ACTIONS), nn.Softmax(dim=1))
+    self.screen_mu=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
+    self.screen_sigma=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
+    self.queued=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
+    self.ctrl_grp_act=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 5)
+    self.ctrl_grp_id=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 10)
+    self.select_point_act=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 4)
 
 
   def forward(self, images, data):
-    return self.feature_image(images), self.feature_data(data)
+    img_feature=self.feature_image(images)
+    data_feature=self.feature_data(data)
+    combined=torch.cat((img_feature, data_feature), dim=1)
+    main_feature=self.main(combined)
+    action=self.actioner(main_feature)
+    result={
+      "action":self.actioner(main_feature),
+      "screen_mu":self.screen_mu(torch.cat((action, main_feature), dim=1)),
+      "screen_sigma":self.screen_sigma(torch.cat((action, main_feature), dim=1)),
+      "queued":self.queued(torch.cat((action, main_feature), dim=1)),
+      "ctrl_grp_act":self.ctrl_grp_act(torch.cat((action, main_feature), dim=1)),
+      "ctrl_grp_id":self.ctrl_grp_id(torch.cat((action, main_feature), dim=1)),
+      "select_point_act":self.select_point_act(torch.cat((action, main_feature), dim=1))
+    }
+    return result
   
   def step(self, obs):
     super(ZergAgent, self).step(obs)
@@ -95,9 +127,14 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
+    feature_screen=torch.tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
 
-    feature_screen=tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
-    return actions.FUNCTIONS.no_op()
+    result=self(feature_screen, data)
+    action=torch.argmax(result['action'])
+    if action_ids[action] in obs.observation['available_actions']:
+      return actions.FunctionCall(action_ids[action], [])
+    else:
+      return actions.FunctionCall(NO_OP, [])
 
 def main(unused_argv):
   agent = ZergAgent()
@@ -108,7 +145,7 @@ def main(unused_argv):
                    sc2_env.Bot(sc2_env.Race.random,
                                sc2_env.Difficulty.very_easy)],
           agent_interface_format=features.AgentInterfaceFormat(
-              feature_dimensions=features.Dimensions(screen=84, minimap=64)),
+              feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
           visualize=False)
