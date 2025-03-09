@@ -7,7 +7,6 @@ from absl import app
 
 #Actions
 SELECT_POINT=actions.FUNCTIONS.select_point.id
-SELECT_ARMY=actions.FUNCTIONS.select_army.id
 MOVE_CAMERA=actions.FUNCTIONS.move_camera.id
 SELECT_CONTROL_GROUP=actions.FUNCTIONS.select_control_group.id
 HARVERST_GATHER=actions.FUNCTIONS.Harvest_Gather_screen.id
@@ -27,7 +26,7 @@ BUILD_HYDRALISKDEN = actions.FUNCTIONS.Build_HydraliskDen_screen.id
 TRAIN_HYDRALISK = actions.FUNCTIONS.Train_Hydralisk_quick.id
 NO_OP=actions.FUNCTIONS.no_op.id
 
-action_ids=[SELECT_POINT, SELECT_ARMY, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
+action_ids=[SELECT_POINT, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
 
 #Constants
 CONV_OUTPUT=256
@@ -111,14 +110,16 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     dist=torch.distributions.Normal(screen_mu, screen_sigma)
     sample=dist.sample()
     x, y = sample[:, 0], sample[:, 1]
-    x, y = torch.sigmoid(x) * 83, torch.sigmoid(y) * 83
+    x, y = torch.sigmoid(x) * (63), torch.sigmoid(y) * (63)
+    screenx, screeny= torch.sigmoid(x) * (MAP_SIZE-1), torch.sigmoid(y) * (MAP_SIZE-1)
     result={
       "action":self.actioner(main_feature),
       "queued":self.queued(torch.cat((action, main_feature), dim=1)),
-      "screen":(y, x),
-      "control_group_act":self.ctrl_grp_act(torch.cat((action, main_feature), dim=1)),
-      "control_group_id":self.ctrl_grp_id(torch.cat((action, main_feature), dim=1)),
-      "select_point_act":self.select_point_act(torch.cat((action, main_feature), dim=1))
+      "minimap":(int(y), int(x)),
+      "screen":(int(screeny), int(screenx)),
+      "control_group_act":torch.argmax(self.ctrl_grp_act(torch.cat((action, main_feature), dim=1))).item(),
+      "control_group_id":torch.argmax(self.ctrl_grp_id(torch.cat((action, main_feature), dim=1))).item(),
+      "select_point_act":torch.argmax(self.select_point_act(torch.cat((action, main_feature), dim=1))).item()
     }
     return result
   
@@ -139,10 +140,17 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     result=self(feature_screen, data)
     args=[]
     action=torch.argmax(result['action'])
-    if action_ids[action] in obs.observation['available_actions']:
+    if int(actions.FUNCTIONS[action_ids[action]].id) in obs.observation['available_actions']:
       for i in actions.FUNCTIONS[action_ids[action]].args:
-        args.append(torch.argmax(result[i.name]))
-      return actions.FunctionCall(action_ids[action], [args])
+        try:
+          val=result[i.name]
+          if isinstance(val, int):
+            val=[val,]
+          args.append(val)
+        except KeyError:
+          print(i, action_ids[action])
+          raise KeyError
+      return actions.FunctionCall(action_ids[action], args)
     else:
       return actions.FunctionCall(NO_OP, [])
 
@@ -170,7 +178,8 @@ def main(unused_argv):
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
-        break
+          print(step_actions)
+
       
   except KeyboardInterrupt:
     pass
