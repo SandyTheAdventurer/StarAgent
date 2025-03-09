@@ -5,18 +5,6 @@ import torch.nn as nn
 import torch
 from absl import app
 
-#Constants
-CONV_OUTPUT=256
-DATA_OUTPUT=64
-COMBINED_OUTPUT=64
-
-N_ACTIONS=20
-
-MAP_SIZE=84
-MAX_SELECT=200
-MAX_CARGO=8
-MAX_QUEUE=5
-
 #Actions
 SELECT_POINT=actions.FUNCTIONS.select_point.id
 SELECT_ARMY=actions.FUNCTIONS.select_army.id
@@ -41,7 +29,18 @@ NO_OP=actions.FUNCTIONS.no_op.id
 
 action_ids=[SELECT_POINT, SELECT_ARMY, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
 
-print(actions.FUNCTIONS[SELECT_POINT])
+#Constants
+CONV_OUTPUT=256
+DATA_OUTPUT=64
+COMBINED_OUTPUT=64
+
+N_ACTIONS=len(action_ids)
+
+MAP_SIZE=84
+MAX_SELECT=200
+MAX_CARGO=8
+MAX_QUEUE=5
+
 torch.set_default_device('cuda')
 
 class ZergAgent(base_agent.BaseAgent, nn.Module):
@@ -83,7 +82,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.Linear(512, 256),
       nn.ReLU(),
       nn.Linear(256, 128),
-      nn.ReLU(),
+      nn.ReLU(), 
       nn.Linear(128, 128),
       nn.ReLU(),
       nn.Linear(128, COMBINED_OUTPUT),
@@ -91,7 +90,10 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       )
     self.actioner=nn.Sequential(nn.Linear(64, N_ACTIONS), nn.Softmax(dim=1))
     self.screen_mu=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
-    self.screen_sigma=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
+    self.screen_sigma=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
+      nn.Softplus()
+    )
     self.queued=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
     self.ctrl_grp_act=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 5)
     self.ctrl_grp_id=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 10)
@@ -104,13 +106,18 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     combined=torch.cat((img_feature, data_feature), dim=1)
     main_feature=self.main(combined)
     action=self.actioner(main_feature)
+    screen_mu= self.screen_mu(torch.cat((action, main_feature), dim=1))
+    screen_sigma= self.screen_sigma(torch.cat((action, main_feature), dim=1))
+    dist=torch.distributions.Normal(screen_mu, screen_sigma)
+    sample=dist.sample()
+    x, y = sample[:, 0], sample[:, 1]
+    x, y = torch.sigmoid(x) * 83, torch.sigmoid(y) * 83
     result={
       "action":self.actioner(main_feature),
-      "screen_mu":self.screen_mu(torch.cat((action, main_feature), dim=1)),
-      "screen_sigma":self.screen_sigma(torch.cat((action, main_feature), dim=1)),
       "queued":self.queued(torch.cat((action, main_feature), dim=1)),
-      "ctrl_grp_act":self.ctrl_grp_act(torch.cat((action, main_feature), dim=1)),
-      "ctrl_grp_id":self.ctrl_grp_id(torch.cat((action, main_feature), dim=1)),
+      "screen":(y, x),
+      "control_group_act":self.ctrl_grp_act(torch.cat((action, main_feature), dim=1)),
+      "control_group_id":self.ctrl_grp_id(torch.cat((action, main_feature), dim=1)),
       "select_point_act":self.select_point_act(torch.cat((action, main_feature), dim=1))
     }
     return result
@@ -130,9 +137,12 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     feature_screen=torch.tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
 
     result=self(feature_screen, data)
+    args=[]
     action=torch.argmax(result['action'])
     if action_ids[action] in obs.observation['available_actions']:
-      return actions.FunctionCall(action_ids[action], [])
+      for i in actions.FUNCTIONS[action_ids[action]].args:
+        args.append(torch.argmax(result[i.name]))
+      return actions.FunctionCall(action_ids[action], [args])
     else:
       return actions.FunctionCall(NO_OP, [])
 
@@ -148,7 +158,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=False)
+          visualize=True)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
@@ -160,7 +170,6 @@ def main(unused_argv):
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
-          break
         break
       
   except KeyboardInterrupt:
