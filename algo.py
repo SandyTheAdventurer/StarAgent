@@ -48,10 +48,10 @@ MAX_CARGO=8
 MAX_QUEUE=5
 
 class Critic(nn.Module):
-  def __init__(self):
+  def __init__(self, size):
     super(Critic, self).__init__()
     self.main=nn.Sequential(
-      nn.Linear(COMBINED_OUTPUT, 256),
+      nn.Linear(size, 256),
       nn.ReLU(),
       nn.Linear(256, 256),
       nn.ReLU(),
@@ -77,7 +77,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     base_agent.BaseAgent.__init__(self)
     nn.Module.__init__(self)
 
-    self.critic=Critic()
+    self.critic=Critic(COMBINED_OUTPUT)
+
+    self.args_critic=Critic(N_ACTIONS + COMBINED_OUTPUT)
 
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
@@ -127,13 +129,34 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
       nn.Softplus()
     )
-    self.queued=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
-    self.ctrl_grp_act=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 5)
-    self.ctrl_grp_id=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 10)
-    self.select_point_act=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 4)
+    self.queued=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
+      nn.Softmax(dim=1)
+    )
+    self.ctrl_grp_act=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 5),
+      nn.Softmax(dim=1)
+    )
+    self.ctrl_grp_id=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 10),
+      nn.Softmax(dim=1)
+    )
+    
+    self.select_point_act=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 4),
+      nn.Softmax(dim=1)
+    )
 
     #Hyperparameters
     self.buffer = deque(maxlen=100000)
+    self.buffers = {
+    "queued" : deque(maxlen=100000),
+    "screen" : deque(maxlen=100000),
+    "minimap" : deque(maxlen=100000),
+    "control_group_act" : deque(maxlen=100000),
+    "control_group_id" : deque(maxlen=100000),
+    "select_point_act" : deque(maxlen=100000)
+    }
     self.ent_coeff = 0.01
     self.γ = 0.99
     self.λ = 0.95
@@ -146,23 +169,57 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     data_feature=self.feature_data(data)
     combined=torch.cat((img_feature, data_feature), dim=1)
     main_feature=self.main(combined)
-    action=self.actioner(main_feature)
-    screen_mu= self.screen_mu(torch.cat((action, main_feature), dim=1))
-    screen_sigma= self.screen_sigma(torch.cat((action, main_feature), dim=1))
-    dist=torch.distributions.Normal(screen_mu, screen_sigma)
-    sample=dist.sample()
+    actions=self.actioner(main_feature)
+    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1))
+    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1))
+
+    screen_dist=torch.distributions.Normal(screen_mu, screen_sigma)
+    sample=screen_dist.sample()
+    screen_logit=screen_dist.log_prob(sample)
+    screen_entropy=screen_dist.entropy()
     x, y = sample[:, 0], sample[:, 1]
     x, y = torch.sigmoid(x) * (63), torch.sigmoid(y) * (63)
     screenx, screeny= torch.sigmoid(x) * (MAP_SIZE-1), torch.sigmoid(y) * (MAP_SIZE-1)
+
+    action_dist=torch.distributions.Categorical(actions)
+    action=action_dist.sample()
+    action_logit=action_dist.log_prob(action)
+    action_entropy=action_dist.entropy()
+
+    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1))
+    queued_dist=torch.distributions.Categorical(queued_dist)
+    queued=queued_dist.sample()
+    queued_logit=queued_dist.log_prob(queued)
+    queued_entropy=queued_dist.entropy()
+
+    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1))
+    ctrl_act_dist=torch.distributions.Categorical(ctrl_act)
+    ctrl_act=ctrl_act_dist.sample()
+    ctrl_act_logit=ctrl_act_dist.log_prob(ctrl_act)
+    ctrl_act_entropy=ctrl_act_dist.entropy()
+
+    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1))
+    ctrl_id_dist=torch.distributions.Categorical(ctrl_id)
+    ctrl_id=ctrl_id_dist.sample()
+    ctrl_id_logit=ctrl_id_dist.log_prob(ctrl_id)
+    ctrl_id_entropy=ctrl_id_dist.entropy()
+
+    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1))
+    select_point_act_dist=torch.distributions.Categorical(select_point_act)
+    select_point_act=select_point_act_dist.sample()
+    select_point_act_logit=select_point_act_dist.log_prob(select_point_act)
+    select_point_act_entropy=select_point_act_dist.entropy
+
     result={
-      "action":self.actioner(main_feature),
-      "queued":self.queued(torch.cat((action, main_feature), dim=1)),
+      "action":action.item(),
+      "queued":queued.item(),
       "minimap":(int(y), int(x)),
       "screen":(int(screeny), int(screenx)),
-      "control_group_act":torch.argmax(self.ctrl_grp_act(torch.cat((action, main_feature), dim=1))).item(),
-      "control_group_id":torch.argmax(self.ctrl_grp_id(torch.cat((action, main_feature), dim=1))).item(),
-      "select_point_act":torch.argmax(self.select_point_act(torch.cat((action, main_feature), dim=1))).item(),
-      "features":main_feature
+      "control_group_act":ctrl_act.item(),
+      "control_group_id":ctrl_id.item(),
+      "select_point_act":select_point_act.item(),
+      "features":main_feature,
+      "logits":{"action" : (action_logit, action_entropy), "queued": (queued_logit, queued_entropy),"screen" : (screen_logit, screen_entropy), "minimap" : (screen_logit, screen_entropy), "control_group_act" : (ctrl_act_logit, ctrl_act_entropy), "control_group_id" : (ctrl_id_logit, ctrl_id_entropy), "select_point_act" : (select_point_act_logit, select_point_act_entropy)}
     }
     return result
   
@@ -191,8 +248,12 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     return advantages
   
-  def infer(self):
-      r, logit, obs, terminated, entropy = zip(*self.buffer)
+  def infer(self, buffer=None, critic=None):
+      if buffer is None:
+          buffer = self.buffer
+      if critic is None:
+          critic = self.args_critic
+      r, logit, obs, terminated, entropy = zip(*buffer)
       
       r = torch.stack(r)
       logit = torch.stack(logit)
@@ -217,13 +278,13 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       self.optimizer.step()
       
       # Recompute values for critic loss (with gradients)
-      val = self.critic(obs)
+      val = critic(obs)
       # Compute critic loss
       critic_loss = ((r - val.squeeze()) ** 2).mean()      
       # Update critic separately
-      self.critic.optimizer.zero_grad()
+      critic.optimizer.zero_grad()
       critic_loss.backward()
-      self.critic.optimizer.step()
+      critic.optimizer.step()
   
       return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
   
@@ -237,7 +298,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     prod_queue_data=torch.tensor(obs.observation['production_queue'][:MAX_QUEUE]) if len(obs.observation['production_queue']) != 0 else torch.zeros(MAX_QUEUE)
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
-    reward=(obs.observation['score_cumulative'][5]-self.unit_score)+ (obs.observation['score_cumulative'][6]-self.building_score)
+    reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
     self.unit_score=obs.observation['score_cumulative'][5]
     self.building_score = obs.observation['score_cumulative'][6]
     reward = reward + obs.reward*100
@@ -249,19 +310,18 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     feature_screen=torch.tensor(feature_screen, dtype=torch.float16).unsqueeze(0)
 
     result=self(feature_screen, data)
+
+    action=result['action']
     
     args=[]
-    
-    dist=torch.distributions.Categorical(result['action'])
-    action=dist.sample()
-    entropy=dist.entropy()
-    logit=dist.log_prob(action)
-    self.buffer.append((torch.tensor(reward), logit, result['features'], torch.tensor(done), entropy))
-
-    action=action.item()
 
     if done:
-      self.infer()
+      self.infer(critic=self.critic)
+      for i in self.buffers:
+        if len(self.buffers[i]) != 0:
+          self.infer(i)
+          i.clear()      
+      self.buffer.clear()
 
     if int(actions.FUNCTIONS[action_ids[action]].id) in obs.observation['available_actions']:
       for i in actions.FUNCTIONS[action_ids[action]].args:
@@ -269,6 +329,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
           val=result[i.name]
           if isinstance(val, int):
             val=[val,]
+          self.buffers[i.name].append((reward, result['logits'][i.name][0], result['features'], done, result['logits'][i.name][1]))
           args.append(val)
         except KeyError:
           print(i, action_ids[action])
@@ -301,7 +362,6 @@ def main(unused_argv):
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
-          print(step_actions)
         break
 
       
