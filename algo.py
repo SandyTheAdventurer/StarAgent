@@ -8,6 +8,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
 import numpy as np
+import ray
+
+ray.init()
 
 torch.set_default_dtype(torch.float16)
 torch.set_default_device('cuda')
@@ -163,7 +166,6 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     self.writer = SummaryWriter("logs/A2C")
     self.unit_score = 0
     self.building_score = 0
-    self.eval()
 
   def forward(self, images, data):
     img_feature=self.feature_image(images)
@@ -250,7 +252,6 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     return advantages
   
   def infer(self, buffer=None, critic=None):
-      self.train()
       if buffer is None:
           buffer = self.buffer
       if critic is None:
@@ -288,8 +289,6 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       critic.optimizer.zero_grad()
       critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
-
-      self.eval()
   
       return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
   
@@ -360,7 +359,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=False)
+          visualize=True)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
