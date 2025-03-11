@@ -368,8 +368,6 @@ def main(unused_argv):
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
-        break
-
       
   except KeyboardInterrupt:
     pass
