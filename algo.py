@@ -38,7 +38,7 @@ action_ids=[SELECT_POINT, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, AT
 #Constants
 CONV_OUTPUT=256
 DATA_OUTPUT=64
-COMBINED_OUTPUT=64
+COMBINED_OUTPUT=128
 
 N_ACTIONS=len(action_ids)
 
@@ -123,7 +123,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.Linear(128, COMBINED_OUTPUT),
       nn.ReLU(),
       )
-    self.actioner=nn.Sequential(nn.Linear(64, N_ACTIONS), nn.Softmax(dim=1))
+    self.actioner=nn.Sequential(nn.Linear(COMBINED_OUTPUT, N_ACTIONS), nn.Softmax(dim=1))
     self.screen_mu=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
     self.screen_sigma=nn.Sequential(
       nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
@@ -208,7 +208,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     select_point_act_dist=torch.distributions.Categorical(select_point_act)
     select_point_act=select_point_act_dist.sample()
     select_point_act_logit=select_point_act_dist.log_prob(select_point_act)
-    select_point_act_entropy=select_point_act_dist.entropy
+    select_point_act_entropy=select_point_act_dist.entropy()
 
     result={
       "action":action.item(),
@@ -218,7 +218,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       "control_group_act":ctrl_act.item(),
       "control_group_id":ctrl_id.item(),
       "select_point_act":select_point_act.item(),
-      "features":main_feature,
+      "features":(main_feature.squeeze(0), torch.cat((actions, main_feature), dim=1).squeeze(0)),
       "logits":{"action" : (action_logit, action_entropy), "queued": (queued_logit, queued_entropy),"screen" : (screen_logit, screen_entropy), "minimap" : (screen_logit, screen_entropy), "control_group_act" : (ctrl_act_logit, ctrl_act_entropy), "control_group_id" : (ctrl_id_logit, ctrl_id_entropy), "select_point_act" : (select_point_act_logit, select_point_act_entropy)}
     }
     return result
@@ -253,6 +253,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
           buffer = self.buffer
       if critic is None:
           critic = self.args_critic
+
       r, logit, obs, terminated, entropy = zip(*buffer)
       
       r = torch.stack(r)
@@ -260,17 +261,17 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       obs = torch.stack(obs)
       terminated = torch.stack(terminated)
       entropy = torch.stack(entropy)
-  
+      
       # Compute values using critic
       with torch.no_grad():  # Don't track gradients here
-          val = self.critic(obs).detach()  # Detach to prevent gradient tracking
+          val = critic(obs).detach()  # Detach to prevent gradient tracking
       
       # Compute advantages
       advantage = self.advantage(r, val, terminated)
       
       # Actor loss
       ent_loss = -entropy.mean() * self.ent_coeff
-      actor_loss = -logit * advantage.detach() + ent_loss  # Detach advantage
+      actor_loss = -logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss  # Detach advantage
       
       # Update actor
       self.optimizer.zero_grad()
@@ -283,7 +284,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       critic_loss = ((r - val.squeeze()) ** 2).mean()      
       # Update critic separately
       critic.optimizer.zero_grad()
-      critic_loss.backward()
+      critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
   
       return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
@@ -303,7 +304,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     self.building_score = obs.observation['score_cumulative'][6]
     reward = reward + obs.reward*100
 
-    done=obs.last()
+    reward = torch.tensor(reward)
+
+    done=torch.tensor(obs.last())
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
@@ -315,10 +318,13 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     
     args=[]
 
+    self.buffer.append((reward, result['logits']['action'][0], result['features'][0], done, result['logits']['action'][1]))
+
     if done:
+      print(reward)
       self.infer(critic=self.critic)
-      for i in self.buffers:
-        if len(self.buffers[i]) != 0:
+      for i in self.buffers.values():
+        if len(i) != 0:
           self.infer(i)
           i.clear()      
       self.buffer.clear()
@@ -329,7 +335,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
           val=result[i.name]
           if isinstance(val, int):
             val=[val,]
-          self.buffers[i.name].append((reward, result['logits'][i.name][0], result['features'], done, result['logits'][i.name][1]))
+          self.buffers[i.name].append((reward, result['logits'][i.name][0], result['features'][1], done, result['logits'][i.name][1]))
           args.append(val)
         except KeyError:
           print(i, action_ids[action])
@@ -350,7 +356,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=False)
+          visualize=True)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
