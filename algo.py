@@ -8,6 +8,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
 import numpy as np
+import ray
+
+ray.init()
 
 torch.set_default_dtype(torch.float16)
 torch.set_default_device('cuda')
