@@ -99,8 +99,23 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.ReLU(),
       nn.MaxPool2d(kernel_size=2),
 
+      nn.Conv2d(128, 128, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
+      nn.Conv2d(128, 128, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
+      nn.Conv2d(128, 256, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
       nn.Flatten(),
-      nn.Linear(128 * 10 * 10, CONV_OUTPUT),
+      nn.Linear(256 * 10 * 10, CONV_OUTPUT),
       nn.ReLU()
     )
     self.feature_data=nn.Sequential(
