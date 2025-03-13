@@ -102,8 +102,23 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.ReLU(),
       nn.MaxPool2d(kernel_size=2),
 
+      nn.Conv2d(128, 128, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
+      nn.Conv2d(128, 128, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
+      nn.Conv2d(128, 256, kernel_size=3, padding=1),
+      nn.BatchNorm2d(128),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=2),
+
       nn.Flatten(),
-      nn.Linear(128 * 10 * 10, CONV_OUTPUT),
+      nn.Linear(256 * 10 * 10, CONV_OUTPUT),
       nn.ReLU()
     )
     self.feature_data=nn.Sequential(
@@ -166,6 +181,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     self.writer = SummaryWriter("logs/A2C")
     self.unit_score = 0
     self.building_score = 0
+    self.eval()
 
   def forward(self, images, data):
     img_feature=self.feature_image(images)
@@ -252,6 +268,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     return advantages
   
   def infer(self, buffer=None, critic=None):
+      self.train()
       if buffer is None:
           buffer = self.buffer
       if critic is None:
@@ -289,6 +306,8 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       critic.optimizer.zero_grad()
       critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
+
+      self.eval()
   
       return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
   
@@ -359,7 +378,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=True)
+          visualize=False)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
