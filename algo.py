@@ -156,8 +156,8 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     combined=torch.cat((img_feature, data_feature), dim=1)
     main_feature=self.main(combined)
     actions=self.actioner(main_feature)
-    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1))
-    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1))
+    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1)).float()
+    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1)).float()
 
     screen_dist=torch.distributions.Normal(screen_mu, screen_sigma)
     sample=screen_dist.sample()
@@ -172,25 +172,25 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     action_logit=action_dist.log_prob(action)
     action_entropy=action_dist.entropy()
 
-    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1))
+    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1)).float()
     queued_dist=torch.distributions.Categorical(queued_dist)
     queued=queued_dist.sample()
     queued_logit=queued_dist.log_prob(queued)
     queued_entropy=queued_dist.entropy()
 
-    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1))
+    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1)).float()
     ctrl_act_dist=torch.distributions.Categorical(ctrl_act)
     ctrl_act=ctrl_act_dist.sample()
     ctrl_act_logit=ctrl_act_dist.log_prob(ctrl_act)
     ctrl_act_entropy=ctrl_act_dist.entropy()
 
-    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1))
+    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1)).float()
     ctrl_id_dist=torch.distributions.Categorical(ctrl_id)
     ctrl_id=ctrl_id_dist.sample()
     ctrl_id_logit=ctrl_id_dist.log_prob(ctrl_id)
     ctrl_id_entropy=ctrl_id_dist.entropy()
 
-    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1))
+    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1)).float()
     select_point_act_dist=torch.distributions.Categorical(select_point_act)
     select_point_act=select_point_act_dist.sample()
     select_point_act_logit=select_point_act_dist.log_prob(select_point_act)
@@ -289,6 +289,8 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
     reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
+    if reward == 0:
+      reward-=15
     self.unit_score=obs.observation['score_cumulative'][5]
     self.building_score = obs.observation['score_cumulative'][6]
     reward = reward + obs.reward*100
@@ -345,7 +347,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=False)
+          visualize=True)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
