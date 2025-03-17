@@ -7,6 +7,7 @@ from absl import app
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
+from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
 import numpy as np
 import ray
 
@@ -39,7 +40,7 @@ NO_OP=actions.FUNCTIONS.no_op.id
 action_ids=[SELECT_POINT, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
 
 #Constants
-CONV_OUTPUT=256
+CONV_OUTPUT=512
 DATA_OUTPUT=64
 COMBINED_OUTPUT=128
 
@@ -86,26 +87,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
-    self.feature_image=nn.Sequential(
-      nn.Conv2d(27, 32, kernel_size=3, padding=1),
-      nn.BatchNorm2d(32),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(32, 64, kernel_size=3, padding=1),
-      nn.BatchNorm2d(64),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(64, 128, kernel_size=3, padding=1),
-      nn.BatchNorm2d(128),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Flatten(),
-      nn.Linear(128 * 10 * 10, CONV_OUTPUT),
-      nn.ReLU()
-    )
+    self.feature_image=resnet(weights=weights.DEFAULT)
+    self.feature_image.conv1 = nn.Conv2d(27, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    self.feature_image=nn.Sequential(*list( self.feature_image.children())[:-1])
     self.feature_data=nn.Sequential(
       nn.Linear(249, 128),
       nn.ReLU(),
@@ -169,12 +153,13 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
   def forward(self, images, data):
     img_feature=self.feature_image(images)
+    img_feature=torch.flatten(img_feature, 1)
     data_feature=self.feature_data(data)
     combined=torch.cat((img_feature, data_feature), dim=1)
     main_feature=self.main(combined)
     actions=self.actioner(main_feature)
-    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1))
-    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1))
+    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1)).float()
+    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1)).float()
 
     screen_dist=torch.distributions.Normal(screen_mu, screen_sigma)
     sample=screen_dist.sample()
@@ -189,25 +174,25 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     action_logit=action_dist.log_prob(action)
     action_entropy=action_dist.entropy()
 
-    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1))
+    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1)).float()
     queued_dist=torch.distributions.Categorical(queued_dist)
     queued=queued_dist.sample()
     queued_logit=queued_dist.log_prob(queued)
     queued_entropy=queued_dist.entropy()
 
-    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1))
+    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1)).float()
     ctrl_act_dist=torch.distributions.Categorical(ctrl_act)
     ctrl_act=ctrl_act_dist.sample()
     ctrl_act_logit=ctrl_act_dist.log_prob(ctrl_act)
     ctrl_act_entropy=ctrl_act_dist.entropy()
 
-    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1))
+    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1)).float()
     ctrl_id_dist=torch.distributions.Categorical(ctrl_id)
     ctrl_id=ctrl_id_dist.sample()
     ctrl_id_logit=ctrl_id_dist.log_prob(ctrl_id)
     ctrl_id_entropy=ctrl_id_dist.entropy()
 
-    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1))
+    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1)).float()
     select_point_act_dist=torch.distributions.Categorical(select_point_act)
     select_point_act=select_point_act_dist.sample()
     select_point_act_logit=select_point_act_dist.log_prob(select_point_act)
@@ -303,6 +288,8 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
     reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
+    if reward == 0:
+      reward-=15
     self.unit_score=obs.observation['score_cumulative'][5]
     self.building_score = obs.observation['score_cumulative'][6]
     reward = reward + obs.reward*100
