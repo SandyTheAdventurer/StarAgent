@@ -7,7 +7,7 @@ from absl import app
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
-from torchvision.models import resnet18 as resnet
+from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
 import numpy as np
 
 torch.set_default_dtype(torch.float16)
@@ -84,7 +84,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
-    self.feature_image=resnet(pretrained=True)
+    self.feature_image=resnet(weights=weights.DEFAULT)
     self.feature_image.conv1 = nn.Conv2d(27, 64, kernel_size=7, stride=2, padding=3, bias=False)
     self.feature_image=nn.Sequential(*list( self.feature_image.children())[:-1])
     self.feature_data=nn.Sequential(
