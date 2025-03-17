@@ -7,6 +7,7 @@ from absl import app
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
+from torchvision.models import resnet18 as resnet
 import numpy as np
 
 torch.set_default_dtype(torch.float16)
@@ -36,7 +37,7 @@ NO_OP=actions.FUNCTIONS.no_op.id
 action_ids=[SELECT_POINT, MOVE_CAMERA, SELECT_CONTROL_GROUP, HARVERST_GATHER, ATTACK_MINIMAP, TRAIN_DRONE_QUICK, BUILD_SPAWNPOOL, TRAIN_ZERGLING, TRAIN_OVERLORD, HARVEST_RETURN, BUILD_HATCHERY, BUILD_EXTRACTOR, BUILD_EVOLUTIONCHAMBER, BUILD_QUEEN, BUILD_ROACHWARREN, TRAIN_ROACH, BUILD_HYDRALISKDEN, TRAIN_HYDRALISK, NO_OP]
 
 #Constants
-CONV_OUTPUT=256
+CONV_OUTPUT=512
 DATA_OUTPUT=64
 COMBINED_OUTPUT=128
 
@@ -83,41 +84,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
-    self.feature_image=nn.Sequential(
-      nn.Conv2d(27, 32, kernel_size=3, padding=1),
-      nn.BatchNorm2d(32),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(32, 64, kernel_size=3, padding=1),
-      nn.BatchNorm2d(64),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(64, 128, kernel_size=3, padding=1),
-      nn.BatchNorm2d(128),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(128, 128, kernel_size=3, padding=1),
-      nn.BatchNorm2d(128),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(128, 128, kernel_size=3, padding=1),
-      nn.BatchNorm2d(128),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Conv2d(128, 256, kernel_size=3, padding=1),
-      nn.BatchNorm2d(256),
-      nn.ReLU(),
-      nn.MaxPool2d(kernel_size=2),
-
-      nn.Flatten(),
-      nn.Linear(256, CONV_OUTPUT),
-      nn.ReLU()
-    )
+    self.feature_image=resnet(pretrained=True)
+    self.feature_image.conv1 = nn.Conv2d(27, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    self.feature_image=nn.Sequential(*list( self.feature_image.children())[:-1])
     self.feature_data=nn.Sequential(
       nn.Linear(249, 128),
       nn.ReLU(),
@@ -182,6 +151,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
   def forward(self, images, data):
     img_feature=self.feature_image(images)
+    img_feature=torch.flatten(img_feature, 1)
     data_feature=self.feature_data(data)
     combined=torch.cat((img_feature, data_feature), dim=1)
     main_feature=self.main(combined)
