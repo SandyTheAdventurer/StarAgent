@@ -7,7 +7,7 @@ from absl import app
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
-from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
+from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
 import numpy as np
 
 torch.set_default_dtype(torch.float16)
@@ -74,9 +74,11 @@ class Critic(nn.Module):
 
 
 class ZergAgent(base_agent.BaseAgent, nn.Module):
-  def __init__(self):
+  def __init__(self, id):
     base_agent.BaseAgent.__init__(self)
     nn.Module.__init__(self)
+
+    self.id=id
 
     self.critic=Critic(COMBINED_OUTPUT)
 
@@ -312,7 +314,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     self.buffer.append((reward, result['logits']['action'][0], result['features'][0], done, result['logits']['action'][1]))
 
     if done:
-      print(reward)
+      print(self.id , ":", reward)
       self.infer(critic=self.critic)
       for i in self.buffers.values():
         if len(i) != 0:
@@ -336,29 +338,34 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       return actions.FunctionCall(NO_OP, [])
 
 def main(unused_argv):
-  agent = ZergAgent()
+  agent1 = ZergAgent(1)
+  agent2 = ZergAgent(2)
   try:
     env=sc2_env.SC2Env(
           map_name="AbyssalReef",
           players=[sc2_env.Agent(sc2_env.Race.zerg),
-                   sc2_env.Bot(sc2_env.Race.random,
-                               sc2_env.Difficulty.very_easy)],
+                   sc2_env.Agent(sc2_env.Race.zerg)],
           agent_interface_format=features.AgentInterfaceFormat(
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
           visualize=True)
     while True:     
-        agent.setup(env.observation_spec(), env.action_spec())
+        agent1.setup(env.observation_spec(), env.action_spec())
+        agent2.setup(env.observation_spec(), env.action_spec())
         
         timesteps = env.reset()
-        agent.reset()
+        agent1.reset()
+        agent2.reset()
         
         while True:
-          step_actions = [agent.step(timesteps[0])]
+          step_action0 = [agent1.step(timesteps[0])]
+          step_action1 = [agent2.step(timesteps[1])]
           if timesteps[0].last():
             break
-          timesteps = env.step(step_actions)
+          if timesteps[0].last():
+            break
+          timesteps = env.step(step_action0 + step_action1)
       
   except KeyboardInterrupt:
     pass
