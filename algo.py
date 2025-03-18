@@ -3,15 +3,18 @@ from pysc2.env import sc2_env
 from pysc2.lib import actions, features
 import torch.nn as nn
 import torch
-from absl import app
+from absl import app, flags
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
 from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
-import numpy as np
+import os
 import ray
 
-ray.init()
+if "RAY_ADDRESS" in os.environ:
+    ray.init(address=os.environ["RAY_ADDRESS"])
+else:
+    ray.init()
 
 torch.set_default_dtype(torch.float16)
 torch.set_default_device('cuda')
@@ -45,11 +48,81 @@ DATA_OUTPUT=64
 COMBINED_OUTPUT=128
 
 N_ACTIONS=len(action_ids)
+WORKERS=2
 
 MAP_SIZE=84
 MAX_SELECT=200
 MAX_CARGO=8
 MAX_QUEUE=5
+
+@ray.remote
+class ParameterServer:
+    def __init__(self):
+        self.global_model = ZergAgent()
+        self.global_model.share_memory()
+        self.optimizer = torch.optim.Adam(self.global_model.parameters(), lr=0.001)
+
+    def get_weights(self):
+        return {k: v.cpu().detach() for k, v in self.global_model.state_dict().items()}
+
+    def update_weights(self, gradients):
+        self.optimizer.zero_grad()
+
+        for param, grad in zip(self.global_model.parameters(), gradients):
+            if grad is not None:
+                param.grad = torch.tensor(grad, device=param.device)
+
+        self.optimizer.step()
+
+@ray.remote(num_gpus=1)
+class Worker:
+    def __init__(self, server, id):
+        self.server = server
+        self.id = id
+        self.model = ZergAgent()
+
+    def run(self):
+        if not flags.FLAGS.is_parsed():
+            flags.FLAGS.mark_as_parsed()
+
+        self.env = sc2_env.SC2Env(
+            map_name="AbyssalReef",
+            players=[sc2_env.Agent(sc2_env.Race.zerg),
+                     sc2_env.Bot(sc2_env.Race.random, sc2_env.Difficulty.very_easy)],
+            agent_interface_format=features.AgentInterfaceFormat(
+                feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
+            step_mul=16,
+            game_steps_per_episode=0,
+            visualize=False
+        )
+
+        while True:
+            self.model.load_state_dict(ray.get(self.server.get_weights.remote()))
+            timesteps = self.env.reset()
+            self.model.reset()
+            step = 0
+
+            while not timesteps[0].last():
+                step_actions = [self.model.step(timesteps[0])]
+
+                if step % 10 == 0:
+                    self.model.load_state_dict(ray.get(self.server.get_weights.remote()))
+
+                timesteps = self.env.step(step_actions)
+                step += 1
+
+            actor_loss, critic_loss, ent_loss, gradients_actor = self.model.infer(critic=self.model.critic)
+            print(f"Worker {self.id}: Actor Loss {actor_loss}, Critic Loss {critic_loss}, Entropy {ent_loss}")
+
+            if gradients_actor:
+                all_gradients = [torch.stack(gradients_actor)]
+                for buffer_name, buffer in self.model.buffers.items():
+                    if len(buffer) != 0:
+                        _, _, _, args_gradients = self.model.infer(buffer=buffer)
+                        all_gradients.append(torch.stack(args_gradients))
+                        buffer.clear()
+
+                ray.get(self.server.update_weights.remote(all_gradients)) 
 
 class Critic(nn.Module):
   def __init__(self, size):
@@ -72,7 +145,7 @@ class Critic(nn.Module):
   
   def step_optimizer(self, loss):
     self.optimizer.zero_grad()
-    loss.backward()
+    loss.backward(retain_graph=True)
     self.optimizer.step()
 
 
@@ -211,7 +284,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     }
     return result
   
-  def step_optimizer(self, loss, retain_graph=False):
+  def step_optimizer(self, loss, retain_graph=True):
       self.optimizer.zero_grad()
       loss.backward(retain_graph=retain_graph)
       self.optimizer.step()
@@ -275,7 +348,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
   
-      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
+      gradients = [p.grad.cpu() for p in self.parameters()]
+
+      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy(), gradients
   
   def step(self, obs):
     super(ZergAgent, self).step(obs)
@@ -300,7 +375,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
-    feature_screen=torch.tensor(feature_screen, dtype=torch.float16).unsqueeze(0)
+    feature_screen=torch.tensor(feature_screen, dtype=torch.get_default_dtype()).unsqueeze(0)
 
     result=self(feature_screen, data)
 
@@ -335,32 +410,29 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       return actions.FunctionCall(NO_OP, [])
 
 def main(unused_argv):
-  agent = ZergAgent()
+
+  global WORKERS
+
+  ps = ParameterServer.remote()
+  
+  ngpus=int(ray.cluster_resources().get('GPU', 0))
+  print(f"Number of GPUs: {ngpus}")
+  
+  WORKERS=min(WORKERS, ngpus)
+
+  workers = [Worker.remote(ps, i) for i in range(WORKERS)]
+  worker_tasks = [worker.run.remote() for worker in workers]
+  
+  ray.get(worker_tasks)
+
+  import time
   try:
-    env=sc2_env.SC2Env(
-          map_name="AbyssalReef",
-          players=[sc2_env.Agent(sc2_env.Race.zerg),
-                   sc2_env.Bot(sc2_env.Race.random,
-                               sc2_env.Difficulty.very_easy)],
-          agent_interface_format=features.AgentInterfaceFormat(
-              feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
-          step_mul=16,
-          game_steps_per_episode=0,
-          visualize=True)
-    while True:     
-        agent.setup(env.observation_spec(), env.action_spec())
-        
-        timesteps = env.reset()
-        agent.reset()
-        
-        while True:
-          step_actions = [agent.step(timesteps[0])]
-          if timesteps[0].last():
-            break
-          timesteps = env.step(step_actions)
-      
+    while True:
+      print("Running. ctrl+C will stop it")
+      time.sleep(60)
   except KeyboardInterrupt:
-    pass
+    print("Shutting down...")
+    ray.shutdown()
   
 if __name__ == "__main__":
   app.run(main)
