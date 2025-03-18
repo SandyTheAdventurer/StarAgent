@@ -418,7 +418,7 @@ def main(unused_argv):
   ngpus=int(ray.cluster_resources().get('GPU', 0))
   print(f"Number of GPUs: {ngpus}")
   
-  WORKERS=min(WORKERS, ngpus)
+  WORKERS=min(WORKERS, ngpus) if ngpus !=1 else WORKERS
 
   workers = [Worker.remote(ps, i) for i in range(WORKERS)]
   worker_tasks = [worker.run.remote() for worker in workers]
