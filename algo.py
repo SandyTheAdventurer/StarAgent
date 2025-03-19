@@ -106,25 +106,17 @@ class Worker:
             step = 0
 
             while not timesteps[0].last():
-                step_actions = [self.model.step(timesteps[0])]
+                step_actions, gradients_actor, args_gradients = self.model.step(timesteps[0])
 
                 if step % 10 == 0:
                     self.model.load_state_dict(ray.get(self.server.get_weights.remote()))
 
-                timesteps = self.env.step(step_actions)
+                timesteps = self.env.step([step_actions])
                 step += 1
-
-            actor_loss, critic_loss, ent_loss, gradients_actor = self.model.infer(critic=self.model.critic)
-            print(f"Worker {self.id}: Actor Loss {actor_loss}, Critic Loss {critic_loss}, Entropy {ent_loss}")
 
             if gradients_actor:
                 all_gradients = [torch.stack(gradients_actor)]
-                for buffer_name, buffer in self.model.buffers.items():
-                    if len(buffer) != 0:
-                        _, _, _, args_gradients = self.model.infer(buffer=buffer)
-                        all_gradients.append(torch.stack(args_gradients))
-                        buffer.clear()
-
+                all_gradients.append(torch.stack(args_gradients))
                 ray.get(self.server.update_weights.remote(all_gradients)) 
 
 class Critic(nn.Module):
@@ -314,52 +306,50 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     return advantages
   
   def infer(self, buffer=None, critic=None):
+      self.train()
       if buffer is None:
-          print("YOOOOOOOOOOOOOOOOOOOOMAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAA")
           buffer = self.buffer
       if critic is None:
-          print("MOTTTTTTTTTTTHEEEEEEEEERFUUUUUUUUCKEEEEER")
           critic = self.args_critic
 
       r, logit, obs, terminated, entropy = zip(*buffer)
       
-      r_actor = torch.stack(r).clone()
-      logit_actor = torch.stack(logit).clone()
-      obs_actor = torch.stack(obs).clone()
-      terminated_actor = torch.stack(terminated).clone()
-      entropy_actor = torch.stack(entropy).clone()
+      r = torch.stack(r)
+      logit = torch.stack(logit)
+      obs = torch.stack(obs)
+      terminated = torch.stack(terminated)
+      entropy = torch.stack(entropy)
       
-      r_critic = torch.stack(r).clone()
-      obs_critic = torch.stack(obs).clone()
-
-      # Actor update
-      with torch.no_grad():
-          val_actor = critic(obs_actor).detach()  # Detached to avoid critic graph interference
-      advantage = self.advantage(r_actor, val_actor, terminated_actor)
-      ent_loss = -entropy_actor.mean() * self.ent_coeff
-      actor_loss = -logit_actor.squeeze(0) * advantage.detach().reshape(-1, 1) + ent_loss
+      # Compute values using critic
+      with torch.no_grad():  # Don't track gradients here
+          val = critic(obs).detach()  # Detach to prevent gradient tracking
       
+      # Compute advantages
+      advantage = self.advantage(r, val, terminated)
+      
+      # Actor loss
+      ent_loss = -entropy.mean() * self.ent_coeff
+      actor_loss = -logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss  # Detach advantage
+      
+      # Update actor
       self.optimizer.zero_grad()
-      actor_loss.mean().backward()  # No retain_graph needed
+      actor_loss.mean().backward(retain_graph=True)
+      self.optimizer.step()
+      
+      # Recompute values for critic loss (with gradients)
+      val = critic(obs)
+      # Compute critic loss
+      critic_loss = ((r - val.squeeze()) ** 2).mean()      
+      # Update critic separately
+      critic.optimizer.zero_grad()
+      critic_loss.backward(retain_graph=True)
+      critic.optimizer.step()
       actor_gradients = [p.grad.clone().cpu() for p in self.parameters() if p.grad is not None]
 
-      # Critic update
-      critic_val = critic(obs_critic)
-      critic_loss = ((r_critic - critic_val.squeeze()) ** 2).mean()
-      critic.optimizer.zero_grad()
-      critic_loss.backward()
-
-      # Apply updates after all gradients are computed
-      self.optimizer.step()
-      critic.optimizer.step()
-
-      return (
-          actor_loss.mean().to('cpu').detach().numpy(),
-          critic_loss.to('cpu').detach().numpy(),
-          ent_loss.mean().to('cpu').detach().numpy(),
-          actor_gradients
-      )
+      self.eval()
   
+      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy(), actor_gradients
+
   def step(self, obs):
     super(ZergAgent, self).step(obs)
     feature_screen=obs.observation['feature_screen']
@@ -393,12 +383,14 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     self.buffer.append((reward.detach(), result['logits']['action'][0], result['features'][0].detach(), done.detach(), result['logits']['action'][1].detach()))
 
+    args_grads, grads=None, None
     if done:
       print(reward)
-      self.infer(critic=self.critic)
+      args_grads=[]
+      _, _, _, grads =self.infer(critic=self.critic)
       for i in self.buffers.values():
         if len(i) != 0:
-          self.infer(i)
+          args_grads.append(self.infer(i)[-1])
           i.clear()      
       self.buffer.clear()
 
@@ -413,9 +405,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
         except KeyError:
           print(i, action_ids[action])
           raise KeyError
-      return actions.FunctionCall(action_ids[action], args)
+      return actions.FunctionCall(action_ids[action], args), grads, args_grads
     else:
-      return actions.FunctionCall(NO_OP, [])
+      return actions.FunctionCall(NO_OP, []), grads, args_grads
 
 def main(unused_argv):
 
