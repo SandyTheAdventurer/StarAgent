@@ -10,9 +10,10 @@ from collections import deque
 from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
 import os
 import ray
+torch.autograd.set_detect_anomaly(True)
 
 if "RAY_ADDRESS" in os.environ:
-    ray.init(address=os.environ["RAY_ADDRESS"])
+    ray.init(address=os.environ["RAY_ADDRESS"], num_gpus=1)
 else:
     ray.init()
 
@@ -48,7 +49,7 @@ DATA_OUTPUT=64
 COMBINED_OUTPUT=128
 
 N_ACTIONS=len(action_ids)
-WORKERS=2
+WORKERS=1
 
 MAP_SIZE=84
 MAX_SELECT=200
@@ -77,6 +78,8 @@ class ParameterServer:
 @ray.remote(num_gpus=1)
 class Worker:
     def __init__(self, server, id):
+        torch.set_default_dtype(torch.float16)
+        torch.set_default_device('cuda')
         self.server = server
         self.id = id
         self.model = ZergAgent()
@@ -228,11 +231,12 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     img_feature=self.feature_image(images)
     img_feature=torch.flatten(img_feature, 1)
     data_feature=self.feature_data(data)
-    combined=torch.cat((img_feature, data_feature), dim=1)
+    combined=torch.cat((img_feature, data_feature), dim=1).clone()
     main_feature=self.main(combined)
-    actions=self.actioner(main_feature)
-    screen_mu= self.screen_mu(torch.cat((actions, main_feature), dim=1)).float()
-    screen_sigma= self.screen_sigma(torch.cat((actions, main_feature), dim=1)).float()
+    actions=self.actioner(main_feature).clone()
+    catted=torch.cat((actions, main_feature), dim=1).clone()
+    screen_mu= self.screen_mu(catted).float()
+    screen_sigma= self.screen_sigma(catted).float()
 
     screen_dist=torch.distributions.Normal(screen_mu, screen_sigma)
     sample=screen_dist.sample()
@@ -247,25 +251,25 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     action_logit=action_dist.log_prob(action)
     action_entropy=action_dist.entropy()
 
-    queued_dist=self.queued(torch.cat((actions, main_feature), dim=1)).float()
+    queued_dist=self.queued(catted).float()
     queued_dist=torch.distributions.Categorical(queued_dist)
     queued=queued_dist.sample()
     queued_logit=queued_dist.log_prob(queued)
     queued_entropy=queued_dist.entropy()
 
-    ctrl_act=self.ctrl_grp_act(torch.cat((actions, main_feature), dim=1)).float()
+    ctrl_act=self.ctrl_grp_act(catted).float()
     ctrl_act_dist=torch.distributions.Categorical(ctrl_act)
     ctrl_act=ctrl_act_dist.sample()
     ctrl_act_logit=ctrl_act_dist.log_prob(ctrl_act)
     ctrl_act_entropy=ctrl_act_dist.entropy()
 
-    ctrl_id=self.ctrl_grp_id(torch.cat((actions, main_feature), dim=1)).float()
+    ctrl_id=self.ctrl_grp_id(catted).float()
     ctrl_id_dist=torch.distributions.Categorical(ctrl_id)
     ctrl_id=ctrl_id_dist.sample()
     ctrl_id_logit=ctrl_id_dist.log_prob(ctrl_id)
     ctrl_id_entropy=ctrl_id_dist.entropy()
 
-    select_point_act=self.select_point_act(torch.cat((actions, main_feature), dim=1)).float()
+    select_point_act=self.select_point_act(catted).float()
     select_point_act_dist=torch.distributions.Categorical(select_point_act)
     select_point_act=select_point_act_dist.sample()
     select_point_act_logit=select_point_act_dist.log_prob(select_point_act)
@@ -279,7 +283,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       "control_group_act":ctrl_act.item(),
       "control_group_id":ctrl_id.item(),
       "select_point_act":select_point_act.item(),
-      "features":(main_feature.squeeze(0), torch.cat((actions, main_feature), dim=1).squeeze(0)),
+      "features":(main_feature.squeeze(0), catted.squeeze(0)),
       "logits":{"action" : (action_logit, action_entropy), "queued": (queued_logit, queued_entropy),"screen" : (screen_logit, screen_entropy), "minimap" : (screen_logit, screen_entropy), "control_group_act" : (ctrl_act_logit, ctrl_act_entropy), "control_group_id" : (ctrl_id_logit, ctrl_id_entropy), "select_point_act" : (select_point_act_logit, select_point_act_entropy)}
     }
     return result
@@ -311,46 +315,50 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
   
   def infer(self, buffer=None, critic=None):
       if buffer is None:
+          print("YOOOOOOOOOOOOOOOOOOOOMAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAA")
           buffer = self.buffer
       if critic is None:
+          print("MOTTTTTTTTTTTHEEEEEEEEERFUUUUUUUUCKEEEEER")
           critic = self.args_critic
 
       r, logit, obs, terminated, entropy = zip(*buffer)
       
-      r = torch.stack(r)
-      logit = torch.stack(logit)
-      obs = torch.stack(obs)
-      terminated = torch.stack(terminated)
-      entropy = torch.stack(entropy)
+      r_actor = torch.stack(r).clone()
+      logit_actor = torch.stack(logit).clone()
+      obs_actor = torch.stack(obs).clone()
+      terminated_actor = torch.stack(terminated).clone()
+      entropy_actor = torch.stack(entropy).clone()
       
-      # Compute values using critic
-      with torch.no_grad():  # Don't track gradients here
-          val = critic(obs).detach()  # Detach to prevent gradient tracking
-      
-      # Compute advantages
-      advantage = self.advantage(r, val, terminated)
-      
-      # Actor loss
-      ent_loss = -entropy.mean() * self.ent_coeff
-      actor_loss = -logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss  # Detach advantage
-      
-      # Update actor
-      self.optimizer.zero_grad()
-      actor_loss.mean().backward(retain_graph=True)
-      self.optimizer.step()
-      
-      # Recompute values for critic loss (with gradients)
-      val = critic(obs)
-      # Compute critic loss
-      critic_loss = ((r - val.squeeze()) ** 2).mean()      
-      # Update critic separately
-      critic.optimizer.zero_grad()
-      critic_loss.backward(retain_graph=True)
-      critic.optimizer.step()
-  
-      gradients = [p.grad.cpu() for p in self.parameters()]
+      r_critic = torch.stack(r).clone()
+      obs_critic = torch.stack(obs).clone()
 
-      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy(), gradients
+      # Actor update
+      with torch.no_grad():
+          val_actor = critic(obs_actor).detach()  # Detached to avoid critic graph interference
+      advantage = self.advantage(r_actor, val_actor, terminated_actor)
+      ent_loss = -entropy_actor.mean() * self.ent_coeff
+      actor_loss = -logit_actor.squeeze(0) * advantage.detach().reshape(-1, 1) + ent_loss
+      
+      self.optimizer.zero_grad()
+      actor_loss.mean().backward()  # No retain_graph needed
+      actor_gradients = [p.grad.clone().cpu() for p in self.parameters() if p.grad is not None]
+
+      # Critic update
+      critic_val = critic(obs_critic)
+      critic_loss = ((r_critic - critic_val.squeeze()) ** 2).mean()
+      critic.optimizer.zero_grad()
+      critic_loss.backward()
+
+      # Apply updates after all gradients are computed
+      self.optimizer.step()
+      critic.optimizer.step()
+
+      return (
+          actor_loss.mean().to('cpu').detach().numpy(),
+          critic_loss.to('cpu').detach().numpy(),
+          ent_loss.mean().to('cpu').detach().numpy(),
+          actor_gradients
+      )
   
   def step(self, obs):
     super(ZergAgent, self).step(obs)
@@ -383,7 +391,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     
     args=[]
 
-    self.buffer.append((reward, result['logits']['action'][0], result['features'][0], done, result['logits']['action'][1]))
+    self.buffer.append((reward.detach(), result['logits']['action'][0], result['features'][0].detach(), done.detach(), result['logits']['action'][1].detach()))
 
     if done:
       print(reward)
@@ -400,7 +408,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
           val=result[i.name]
           if isinstance(val, int):
             val=[val,]
-          self.buffers[i.name].append((reward, result['logits'][i.name][0], result['features'][1], done, result['logits'][i.name][1]))
+          self.buffers[i.name].append((reward.detach(), result['logits'][i.name][0], result['features'][1].detach(), done.detach(), result['logits'][i.name][1].detach()))
           args.append(val)
         except KeyError:
           print(i, action_ids[action])
@@ -418,7 +426,7 @@ def main(unused_argv):
   ngpus=int(ray.cluster_resources().get('GPU', 0))
   print(f"Number of GPUs: {ngpus}")
   
-  WORKERS=min(WORKERS, ngpus) if ngpus !=1 else WORKERS
+  WORKERS=min(WORKERS, ngpus)
 
   workers = [Worker.remote(ps, i) for i in range(WORKERS)]
   worker_tasks = [worker.run.remote() for worker in workers]
