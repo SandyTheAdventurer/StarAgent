@@ -98,36 +98,66 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     self.main=nn.Sequential(
       nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 512),
       nn.ReLU(),
-      nn.Linear(512, 256),
-      nn.ReLU(),
-      nn.Linear(256, 128),
+      nn.Linear(512, 128),
       nn.ReLU(), 
       nn.Linear(128, 128),
       nn.ReLU(),
       nn.Linear(128, COMBINED_OUTPUT),
       nn.ReLU(),
       )
-    self.actioner=nn.Sequential(nn.Linear(COMBINED_OUTPUT, N_ACTIONS), nn.Softmax(dim=1))
-    self.screen_mu=nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2)
+    self.actioner=nn.Sequential(nn.Linear(COMBINED_OUTPUT, 128),
+                                nn.Linear(128, 128),
+                                nn.ReLU(),
+                                nn.Linear(128, 64),
+                                nn.ReLU(),
+                                nn.Linear(64, N_ACTIONS),
+                                nn.Softmax(dim=1))
+    self.screen_mu=nn.Sequential(
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 2)
+    )
     self.screen_sigma=nn.Sequential(
-      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 2),
       nn.Softplus()
     )
     self.queued=nn.Sequential(
-      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 2),
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 2),
       nn.Softmax(dim=1)
     )
     self.ctrl_grp_act=nn.Sequential(
-      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 5),
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 5),
       nn.Softmax(dim=1)
     )
     self.ctrl_grp_id=nn.Sequential(
-      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 10),
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 10),
       nn.Softmax(dim=1)
     )
     
     self.select_point_act=nn.Sequential(
-      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 4),
+      nn.Linear(N_ACTIONS + COMBINED_OUTPUT, 128),
+      nn.ReLU(),
+      nn.Linear(128, 128),
+      nn.ReLU(),
+      nn.Linear(128, 4),
       nn.Softmax(dim=1)
     )
 
