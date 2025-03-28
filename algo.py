@@ -7,7 +7,7 @@ from absl import app, flags
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
-from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
+from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
 import os
 import ray
 torch.autograd.set_detect_anomaly(True)
@@ -56,9 +56,11 @@ MAX_SELECT=200
 MAX_CARGO=8
 MAX_QUEUE=5
 
-@ray.remote
+@ray.remote(num_gpus=1)
 class ParameterServer:
     def __init__(self):
+        torch.set_default_dtype(torch.float16)
+        torch.set_default_device('cuda')
         self.global_model = ZergAgent()
         self.global_model.share_memory()
         self.optimizer = torch.optim.Adam(self.global_model.parameters(), lr=0.001)
