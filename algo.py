@@ -7,11 +7,11 @@ from absl import app
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
-from torchvision.models import resnet34 as resnet, ResNet34_Weights as weights
+from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
 import numpy as np
 
-torch.set_default_dtype(torch.float16)
-torch.set_default_device('cuda')
+torch.set_default_dtype(torch.float32)
+torch.set_default_device('cpu')
 
 #Actions
 SELECT_POINT=actions.FUNCTIONS.select_point.id
@@ -96,9 +96,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.ReLU()
     )
     self.main=nn.Sequential(
-      nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 512),
+      nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 256),
       nn.ReLU(),
-      nn.Linear(512, 128),
+      nn.Linear(256, 128),
       nn.ReLU(), 
       nn.Linear(128, 128),
       nn.ReLU(),
@@ -273,18 +273,24 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
       r, logit, obs, terminated, entropy = zip(*buffer)
       
-      r = torch.stack(r)
-      logit = torch.stack(logit)
-      obs = torch.stack(obs)
-      terminated = torch.stack(terminated)
-      entropy = torch.stack(entropy)
+      r = torch.stack(r).to("cuda") / 100
+      logit = torch.stack(logit).to("cuda")
+      obs = torch.stack(obs).to("cuda")
+      terminated = torch.stack(terminated).to("cuda")
+      entropy = torch.stack(entropy).to("cuda")
+
+      critic = critic.to("cuda")
       
       # Compute values using critic
       with torch.no_grad():  # Don't track gradients here
-          val = critic(obs).detach()  # Detach to prevent gradient tracking
-      
+          val = critic(obs).detach().to("cuda")  # Detach to prevent gradient tracking
+
       # Compute advantages
       advantage = self.advantage(r, val, terminated)
+      advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Normalize advantage
+      
+      assert not torch.isnan(val).any(), "Critic returned NaN values!"
+      assert not torch.isnan(advantage).any(), "Advantage has NaN!"
       
       # Actor loss
       ent_loss = -entropy.mean() * self.ent_coeff
@@ -296,7 +302,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       self.optimizer.step()
       
       # Recompute values for critic loss (with gradients)
-      val = critic(obs)
+      val = critic(obs).to("cuda")
       # Compute critic loss
       critic_loss = ((r - val.squeeze()) ** 2).mean()      
       # Update critic separately
@@ -304,11 +310,15 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
 
+      critic = critic.to("cpu")
+
       self.eval()
+
+      torch.cuda.empty_cache()
   
       return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
   
-  def step(self, obs):
+  def step(self, obs, iter):
     super(ZergAgent, self).step(obs)
     feature_screen=obs.observation['feature_screen']
     player_data=torch.tensor(obs.observation['player'])
@@ -319,6 +329,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
     reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
+    reward += 1.5 * np.sum(obs.observation['score_by_vital'][0]) - np.sum(obs.observation['score_by_vital'][1]) + 1.5 * np.sum(obs.observation['score_by_vital'][2])
     if reward == 0:
       reward-=15
     self.unit_score=obs.observation['score_cumulative'][5]
@@ -331,24 +342,41 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
-    feature_screen=torch.tensor(feature_screen, dtype=torch.float16).unsqueeze(0)
+    feature_screen=torch.tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
 
     result=self(feature_screen, data)
 
     action=result['action']
     
     args=[]
+    args_losses=[]
 
     self.buffer.append((reward, result['logits']['action'][0], result['features'][0], done, result['logits']['action'][1]))
 
     if done:
       print(reward)
-      self.infer(critic=self.critic)
+      main_losses=self.infer(critic=self.critic)
       for i in self.buffers.values():
         if len(i) != 0:
-          self.infer(i)
+          key = next((k for k, v in self.buffers.items() if v == i), None)
+          args_losses.append((key, self.infer(i)))
           i.clear()      
       self.buffer.clear()
+      self.writer.add_scalar("Losses/actioner/actor_loss", main_losses[0], iter)
+      self.writer.add_scalar("Losses/actioner/critic_loss", main_losses[1], iter)
+      self.writer.add_scalar("Losses/actioner/entropy_loss", main_losses[2], iter)
+      for key, losses in args_losses:
+        self.writer.add_scalar(f"Losses/{key}/actor_loss", losses[0], iter)
+        self.writer.add_scalar(f"Losses/{key}/critic_loss", losses[1], iter)
+        self.writer.add_scalar(f"Losses/{key}/entropy_loss", losses[2], iter)
+      self.writer.add_scalar("Rewards/total_reward", reward, iter)
+      self.writer.add_scalar("Rewards/damage_recieved", sum(obs.observation['score_by_vital'][1]), iter)
+      self.writer.add_scalar("Rewards/damage_dealt", sum(obs.observation['score_by_vital'][0]), iter)
+      self.writer.add_scalar("Rewards/units_killed", obs.observation['score_cumulative'][7], iter)
+      self.writer.add_scalar("Rewards/buildings_killed", obs.observation['score_cumulative'][8], iter)
+      self.writer.add_scalar("Rewards/units_lost", obs.observation['score_cumulative'][9], iter)
+      self.writer.add_scalar("Rewards/buildings_lost", obs.observation['score_cumulative'][10], iter)
+      self.writer.add_scalar("Rewards/damage_healed", sum(obs.observation['score_by_vital'][2]), iter)
 
     if int(actions.FUNCTIONS[action_ids[action]].id) in obs.observation['available_actions']:
       for i in actions.FUNCTIONS[action_ids[action]].args:
@@ -377,7 +405,7 @@ def main(unused_argv):
               feature_dimensions=features.Dimensions(screen=MAP_SIZE, minimap=64)),
           step_mul=16,
           game_steps_per_episode=0,
-          visualize=True)
+          visualize=False)
     while True:     
         agent.setup(env.observation_spec(), env.action_spec())
         
@@ -385,7 +413,7 @@ def main(unused_argv):
         agent.reset()
         
         while True:
-          step_actions = [agent.step(timesteps[0])]
+          step_actions = [agent.step(timesteps[0], env._episode_count)]
           if timesteps[0].last():
             break
           timesteps = env.step(step_actions)
