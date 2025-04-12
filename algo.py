@@ -4,14 +4,20 @@ from pysc2.lib import actions, features
 import torch.nn as nn
 import torch
 from absl import app
+from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
 from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
 import numpy as np
 
-torch.set_default_dtype(torch.float32)
-torch.set_default_device('cpu')
+#Precision
+P_CRITIC=torch.float32
+P_ACTOR=torch.float16
+
+torch.set_default_dtype(P_ACTOR)
+torch.set_default_device('cuda')
 
 #Actions
 SELECT_POINT=actions.FUNCTIONS.select_point.id
@@ -61,7 +67,7 @@ class Critic(nn.Module):
       nn.Linear(128, 128),
       nn.ReLU(),
       nn.Linear(128, 1),
-    )
+    ).to(P_CRITIC)
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
   def forward(self, x):
@@ -162,14 +168,14 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     )
 
     #Hyperparameters
-    self.buffer = deque(maxlen=100000)
+    self.buffer = deque(maxlen=10000)
     self.buffers = {
-    "queued" : deque(maxlen=100000),
-    "screen" : deque(maxlen=100000),
-    "minimap" : deque(maxlen=100000),
-    "control_group_act" : deque(maxlen=100000),
-    "control_group_id" : deque(maxlen=100000),
-    "select_point_act" : deque(maxlen=100000)
+    "queued" : deque(maxlen=10000),
+    "screen" : deque(maxlen=10000),
+    "minimap" : deque(maxlen=10000),
+    "control_group_act" : deque(maxlen=10000),
+    "control_group_id" : deque(maxlen=10000),
+    "select_point_act" : deque(maxlen=10000)
     }
     self.ent_coeff = 0.01
     self.γ = 0.99
@@ -273,44 +279,46 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
       r, logit, obs, terminated, entropy = zip(*buffer)
       
-      r = torch.stack(r).to("cuda") / 100
-      logit = torch.stack(logit).to("cuda")
-      obs = torch.stack(obs).to("cuda")
-      terminated = torch.stack(terminated).to("cuda")
-      entropy = torch.stack(entropy).to("cuda")
-
-      critic = critic.to("cuda")
+      r = torch.stack(r) / 100
+      logit = torch.stack(logit)
+      obs = torch.stack(obs)
+      terminated = torch.stack(terminated)
+      entropy = torch.stack(entropy)
       
-      # Compute values using critic
-      with torch.no_grad():  # Don't track gradients here
-          val = critic(obs).detach().to("cuda")  # Detach to prevent gradient tracking
+      obs = DataLoader(obs, batch_size=64)
+      val = []
+      with autocast("cuda"):
+        with torch.no_grad():
+            for i in obs:
+                val.append(critic(i.to("cuda")))
+      val = torch.cat(val, dim=0)
 
       # Compute advantages
       advantage = self.advantage(r, val, terminated)
-      advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Normalize advantage
+      advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
       
       assert not torch.isnan(val).any(), "Critic returned NaN values!"
       assert not torch.isnan(advantage).any(), "Advantage has NaN!"
       
       # Actor loss
-      ent_loss = -entropy.mean() * self.ent_coeff
-      actor_loss = -logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss  # Detach advantage
+      ent_loss = (-entropy.mean() * self.ent_coeff)
+      actor_loss = (-logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss)
       
       # Update actor
       self.optimizer.zero_grad()
       actor_loss.mean().backward(retain_graph=True)
       self.optimizer.step()
       
-      # Recompute values for critic loss (with gradients)
-      val = critic(obs).to("cuda")
-      # Compute critic loss
+      val = []
+      with autocast("cuda"):
+        for i in obs:
+            val.append(critic(i))
+      val = torch.cat(val, dim=0)
       critic_loss = ((r - val.squeeze()) ** 2).mean()      
       # Update critic separately
       critic.optimizer.zero_grad()
       critic_loss.backward(retain_graph=True)
       critic.optimizer.step()
-
-      critic = critic.to("cpu")
 
       self.eval()
 
@@ -342,7 +350,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
-    feature_screen=torch.tensor(feature_screen, dtype=torch.float32).unsqueeze(0)
+    feature_screen=torch.tensor(feature_screen, dtype=P_ACTOR).unsqueeze(0)
 
     result=self(feature_screen, data)
 
@@ -406,7 +414,7 @@ def main(unused_argv):
           step_mul=16,
           game_steps_per_episode=0,
           visualize=False)
-    while True:     
+    while True:
         agent.setup(env.observation_spec(), env.action_spec())
         
         timesteps = env.reset()
