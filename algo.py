@@ -419,9 +419,6 @@ def main(unused_argv):
         
         timesteps = env.reset()
         agent.reset()
-
-        print(dir(timesteps[0].observation), type(timesteps[0].observation))
-        break
         
         while True:
           step_actions = [agent.step(timesteps[0], env._episode_count)]
