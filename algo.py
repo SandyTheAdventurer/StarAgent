@@ -4,9 +4,13 @@ from pysc2.lib import actions, features
 import torch.nn as nn
 import torch
 from absl import app, flags
+from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from collections import deque
+from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
+import numpy as np
 from torchvision.models import resnet18 as resnet, ResNet18_Weights as weights
 import os
 import ray
@@ -17,7 +21,11 @@ if "RAY_ADDRESS" in os.environ:
 else:
     ray.init()
 
-torch.set_default_dtype(torch.float16)
+#Precision
+P_CRITIC=torch.float32
+P_ACTOR=torch.float16
+
+torch.set_default_dtype(P_ACTOR)
 torch.set_default_device('cuda')
 
 #Actions
@@ -134,7 +142,7 @@ class Critic(nn.Module):
       nn.Linear(128, 128),
       nn.ReLU(),
       nn.Linear(128, 1),
-    )
+    ).to(P_CRITIC)
     self.optimizer=torch.optim.Adam(self.parameters(), lr=0.001)
 
   def forward(self, x):
@@ -169,9 +177,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       nn.ReLU()
     )
     self.main=nn.Sequential(
-      nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 512),
+      nn.Linear(CONV_OUTPUT + DATA_OUTPUT, 256),
       nn.ReLU(),
-      nn.Linear(512, 128),
+      nn.Linear(256, 128),
       nn.ReLU(), 
       nn.Linear(128, 128),
       nn.ReLU(),
@@ -235,14 +243,14 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     )
 
     #Hyperparameters
-    self.buffer = deque(maxlen=100000)
+    self.buffer = deque(maxlen=10000)
     self.buffers = {
-    "queued" : deque(maxlen=100000),
-    "screen" : deque(maxlen=100000),
-    "minimap" : deque(maxlen=100000),
-    "control_group_act" : deque(maxlen=100000),
-    "control_group_id" : deque(maxlen=100000),
-    "select_point_act" : deque(maxlen=100000)
+    "queued" : deque(maxlen=10000),
+    "screen" : deque(maxlen=10000),
+    "minimap" : deque(maxlen=10000),
+    "control_group_act" : deque(maxlen=10000),
+    "control_group_id" : deque(maxlen=10000),
+    "select_point_act" : deque(maxlen=10000)
     }
     self.ent_coeff = 0.01
     self.γ = 0.99
@@ -352,25 +360,35 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       terminated = torch.stack(terminated)
       entropy = torch.stack(entropy)
       
-      # Compute values using critic
-      with torch.no_grad():  # Don't track gradients here
-          val = critic(obs).detach()  # Detach to prevent gradient tracking
-      
+      obs = DataLoader(obs, batch_size=64)
+      val = []
+      with autocast("cuda"):
+        with torch.no_grad():
+            for i in obs:
+                val.append(critic(i.to("cuda")))
+      val = torch.cat(val, dim=0)
+
       # Compute advantages
       advantage = self.advantage(r, val, terminated)
+      advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+      
+      assert not torch.isnan(val).any(), "Critic returned NaN values!"
+      assert not torch.isnan(advantage).any(), "Advantage has NaN!"
       
       # Actor loss
-      ent_loss = -entropy.mean() * self.ent_coeff
-      actor_loss = -logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss  # Detach advantage
+      ent_loss = (-entropy.mean() * self.ent_coeff)
+      actor_loss = (-logit.squeeze(0) * advantage.reshape(-1,1).detach() + ent_loss)
       
       # Update actor
       self.optimizer.zero_grad()
       actor_loss.mean().backward(retain_graph=True)
       self.optimizer.step()
       
-      # Recompute values for critic loss (with gradients)
-      val = critic(obs)
-      # Compute critic loss
+      val = []
+      with autocast("cuda"):
+        for i in obs:
+            val.append(critic(i))
+      val = torch.cat(val, dim=0)
       critic_loss = ((r - val.squeeze()) ** 2).mean()      
       # Update critic separately
       critic.optimizer.zero_grad()
@@ -379,10 +397,12 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       actor_gradients = [p.grad.clone().cpu() for p in self.parameters() if p.grad is not None]
 
       self.eval()
-  
-      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy(), actor_gradients
 
-  def step(self, obs):
+      torch.cuda.empty_cache()
+  
+      return actor_loss.mean().to('cpu').detach().numpy(), critic_loss.to('cpu').detach().numpy(), ent_loss.mean().to('cpu').detach().numpy()
+  
+  def step(self, obs, iter):
     super(ZergAgent, self).step(obs)
     feature_screen=obs.observation['feature_screen']
     player_data=torch.tensor(obs.observation['player'])
@@ -392,7 +412,10 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     prod_queue_data=torch.tensor(obs.observation['production_queue'][:MAX_QUEUE]) if len(obs.observation['production_queue']) != 0 else torch.zeros(MAX_QUEUE)
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
-    reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
+    killed_now=obs.observation['score_cumulative'][5]-self.unit_score
+    razed_now=obs.observation['score_cumulative'][6]-self.building_score
+    reward=(razed_now) + (killed_now)
+    reward += 1.5 * np.sum(obs.observation['score_by_vital'][0]) - np.sum(obs.observation['score_by_vital'][1]) + 1.5 * np.sum(obs.observation['score_by_vital'][2])
     if reward == 0:
       reward-=15
     self.unit_score=obs.observation['score_cumulative'][5]
@@ -405,26 +428,40 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
     data=torch.cat((player_data, ctrl_data, multi_select, cargo_data, prod_queue_data, build_queue_data), dim=0)
     data=data.unsqueeze(0)
-    feature_screen=torch.tensor(feature_screen, dtype=torch.get_default_dtype()).unsqueeze(0)
+    feature_screen=torch.tensor(feature_screen, dtype=P_ACTOR).unsqueeze(0)
 
     result=self(feature_screen, data)
 
     action=result['action']
     
     args=[]
+    args_losses=[]
 
     self.buffer.append((reward.detach(), result['logits']['action'][0], result['features'][0].detach(), done.detach(), result['logits']['action'][1].detach()))
 
     args_grads, grads=None, None
     if done:
       print(reward)
-      args_grads=[]
-      _, _, _, grads =self.infer(critic=self.critic)
+      main_losses=self.infer(critic=self.critic)
       for i in self.buffers.values():
         if len(i) != 0:
-          args_grads.append(self.infer(i)[-1])
+          key = next((k for k, v in self.buffers.items() if v == i), None)
+          args_losses.append((key, self.infer(i)))
           i.clear()      
       self.buffer.clear()
+      self.writer.add_scalar("Losses/actioner/actor_loss", main_losses[0], iter)
+      self.writer.add_scalar("Losses/actioner/critic_loss", main_losses[1], iter)
+      self.writer.add_scalar("Losses/actioner/entropy_loss", main_losses[2], iter)
+      for key, losses in args_losses:
+        self.writer.add_scalar(f"Losses/{key}/actor_loss", losses[0], iter)
+        self.writer.add_scalar(f"Losses/{key}/critic_loss", losses[1], iter)
+        self.writer.add_scalar(f"Losses/{key}/entropy_loss", losses[2], iter)
+      self.writer.add_scalar("Rewards/total_reward", reward, iter)
+      self.writer.add_scalar("Rewards/damage_recieved", sum(obs.observation['score_by_vital'][1]), iter)
+      self.writer.add_scalar("Rewards/damage_dealt", sum(obs.observation['score_by_vital'][0]), iter)
+      self.writer.add_scalar("Rewards/units_killed", killed_now, iter)
+      self.writer.add_scalar("Rewards/buildings_killed", razed_now, iter)
+      self.writer.add_scalar("Rewards/damage_healed", sum(obs.observation['score_by_vital'][2]), iter)
 
     if int(actions.FUNCTIONS[action_ids[action]].id) in obs.observation['available_actions']:
       for i in actions.FUNCTIONS[action_ids[action]].args:
