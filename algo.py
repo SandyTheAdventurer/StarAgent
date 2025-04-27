@@ -64,7 +64,7 @@ MAX_SELECT=200
 MAX_CARGO=8
 MAX_QUEUE=5
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.5)
 class ParameterServer:
     def __init__(self):
         torch.set_default_dtype(torch.float16)
@@ -85,7 +85,7 @@ class ParameterServer:
 
         self.optimizer.step()
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.5)
 class Worker:
     def __init__(self, server, id):
         torch.set_default_dtype(torch.float16)
@@ -116,7 +116,7 @@ class Worker:
             step = 0
 
             while not timesteps[0].last():
-                step_actions, gradients_actor, args_gradients = self.model.step(timesteps[0])
+                step_actions, gradients_actor, args_gradients = self.model.step(timesteps[0], self.env._episode_count)
 
                 if step % 10 == 0:
                     self.model.load_state_dict(ray.get(self.server.get_weights.remote()))
