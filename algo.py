@@ -279,7 +279,7 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
 
       r, logit, obs, terminated, entropy = zip(*buffer)
       
-      r = torch.stack(r) / 100
+      r = torch.stack(r)
       logit = torch.stack(logit)
       obs = torch.stack(obs)
       terminated = torch.stack(terminated)
@@ -336,7 +336,9 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
     prod_queue_data=torch.tensor(obs.observation['production_queue'][:MAX_QUEUE]) if len(obs.observation['production_queue']) != 0 else torch.zeros(MAX_QUEUE)
     build_queue_data=torch.tensor(obs.observation['build_queue'][:MAX_QUEUE]) if len(obs.observation['build_queue']) != 0 else torch.zeros(MAX_QUEUE)
 
-    reward=(obs.observation['score_cumulative'][5]-self.unit_score) + (obs.observation['score_cumulative'][6]-self.building_score)
+    killed_now=obs.observation['score_cumulative'][5]-self.unit_score
+    razed_now=obs.observation['score_cumulative'][6]-self.building_score
+    reward=(razed_now) + (killed_now)
     reward += 1.5 * np.sum(obs.observation['score_by_vital'][0]) - np.sum(obs.observation['score_by_vital'][1]) + 1.5 * np.sum(obs.observation['score_by_vital'][2])
     if reward == 0:
       reward-=15
@@ -380,10 +382,8 @@ class ZergAgent(base_agent.BaseAgent, nn.Module):
       self.writer.add_scalar("Rewards/total_reward", reward, iter)
       self.writer.add_scalar("Rewards/damage_recieved", sum(obs.observation['score_by_vital'][1]), iter)
       self.writer.add_scalar("Rewards/damage_dealt", sum(obs.observation['score_by_vital'][0]), iter)
-      self.writer.add_scalar("Rewards/units_killed", obs.observation['score_cumulative'][7], iter)
-      self.writer.add_scalar("Rewards/buildings_killed", obs.observation['score_cumulative'][8], iter)
-      self.writer.add_scalar("Rewards/units_lost", obs.observation['score_cumulative'][9], iter)
-      self.writer.add_scalar("Rewards/buildings_lost", obs.observation['score_cumulative'][10], iter)
+      self.writer.add_scalar("Rewards/units_killed", killed_now, iter)
+      self.writer.add_scalar("Rewards/buildings_killed", razed_now, iter)
       self.writer.add_scalar("Rewards/damage_healed", sum(obs.observation['score_by_vital'][2]), iter)
 
     if int(actions.FUNCTIONS[action_ids[action]].id) in obs.observation['available_actions']:
@@ -419,6 +419,9 @@ def main(unused_argv):
         
         timesteps = env.reset()
         agent.reset()
+
+        print(dir(timesteps[0].observation), type(timesteps[0].observation))
+        break
         
         while True:
           step_actions = [agent.step(timesteps[0], env._episode_count)]
